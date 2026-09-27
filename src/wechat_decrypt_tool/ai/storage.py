@@ -13,6 +13,25 @@ from pathlib import Path
 from ..app_paths import get_output_dir
 
 
+# 事件默认保留窗口；超过该窗口且无需重放的事件会被回收。
+EVENT_RETENTION_SECONDS = 24 * 3600
+# 事件表空闲页超过该阈值才执行 VACUUM，避免频繁全库重写。
+COMPACT_MINIMUM_BYTES = 64 * 1024 * 1024
+
+SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS records (
+        kind TEXT NOT NULL, id TEXT NOT NULL, account TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL, updated REAL NOT NULL, PRIMARY KEY(kind,id));
+    CREATE INDEX IF NOT EXISTS records_account ON records(kind,account,updated);
+    CREATE INDEX IF NOT EXISTS records_status ON records(kind,json_extract(body,'$.status'),updated);
+    CREATE INDEX IF NOT EXISTS records_task_usage ON records(kind,account,json_extract(body,'$.task_id'));
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL,
+        kind TEXT NOT NULL, body TEXT NOT NULL, unique_key TEXT UNIQUE,
+        delivered INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
+"""
+
+
 class AIStore:
     """短事务业务存储；与工作流检查点分开，避免模型请求持有数据库锁。"""
 
@@ -27,18 +46,7 @@ class AIStore:
         self._event_condition = threading.Condition()
         self._event_revisions = {}
         with self.connection() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS records (
-                    kind TEXT NOT NULL, id TEXT NOT NULL, account TEXT NOT NULL DEFAULT '',
-                    body TEXT NOT NULL, updated REAL NOT NULL, PRIMARY KEY(kind,id));
-                CREATE INDEX IF NOT EXISTS records_account ON records(kind,account,updated);
-                CREATE INDEX IF NOT EXISTS records_status ON records(kind,json_extract(body,'$.status'),updated);
-                CREATE INDEX IF NOT EXISTS records_task_usage ON records(kind,account,json_extract(body,'$.task_id'));
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL,
-                    kind TEXT NOT NULL, body TEXT NOT NULL, unique_key TEXT UNIQUE,
-                    delivered INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
-            """)
+            db.executescript(SCHEMA_SQL)
 
     @contextmanager
     def connection(self):
@@ -108,13 +116,30 @@ class AIStore:
         with self.connection() as db:
             db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, id))
 
-    def event(self, account, kind, body, unique_key=None):
-        inserted = False
+    def event(self, account, kind, body, unique_key=None, replace=False):
+        """写入事件供 SSE 重放。
+
+        默认行为保持不变：提供 `unique_key` 时按去重语义写入（同 key 已存在则忽略），
+        用于提醒等只应投递一次的事件。`replace=True` 时改为用最新快照替换旧行，
+        让高频进度事件每个逻辑任务只保留一行，同时因 INSERT OR REPLACE 会删除旧行、
+        新行仍获得递增的自增 id，断线重连的 EventSource 依然能收到最新状态。
+        """
         with self.connection() as db:
             if account in self.revoked_accounts:
                 return
-            cursor = db.execute("INSERT OR IGNORE INTO events(account,kind,body,unique_key,created) VALUES(?,?,?,?,?)",
-                                (account, kind, json.dumps(body, ensure_ascii=False), unique_key, time.time()))
+            payload = json.dumps(body, ensure_ascii=False)
+            if unique_key is None:
+                cursor = db.execute(
+                    "INSERT INTO events(account,kind,body,created) VALUES(?,?,?,?)",
+                    (account, kind, payload, time.time()))
+            elif replace:
+                cursor = db.execute(
+                    "INSERT OR REPLACE INTO events(account,kind,body,unique_key,created) VALUES(?,?,?,?,?)",
+                    (account, kind, payload, unique_key, time.time()))
+            else:
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO events(account,kind,body,unique_key,created) VALUES(?,?,?,?,?)",
+                    (account, kind, payload, unique_key, time.time()))
             inserted = cursor.rowcount > 0
         if inserted:
             with self._event_condition:
@@ -150,6 +175,89 @@ class AIStore:
     def acknowledge(self, id):
         with self.connection() as db:
             db.execute("UPDATE events SET delivered=1 WHERE id=?", (id,))
+
+    @observed('storage.prune_duplicates')
+    def prune_duplicate_events(self, batch=2000):
+        """一次性折叠旧版追加式进度事件：每个逻辑任务只保留最新快照。
+
+        新写入的进度事件已带 unique_key、本身只保留一行；这里主要清理升级前
+        历史遗留的、同一任务多次追加的整份快照，避免巨型库只能等 TTL 慢慢过期。
+        """
+        total = 0
+        for kind, field in (('local_search_index', '$.id'), ('local_search_download', '$.id'),
+                            ('local_search_total', '$.job_id')):
+            with self.connection() as db:
+                db.execute("CREATE TEMP TABLE IF NOT EXISTS keep_event_ids(id INTEGER PRIMARY KEY)")
+                db.execute("DELETE FROM keep_event_ids")
+                db.execute(
+                    f"INSERT INTO keep_event_ids SELECT max(id) FROM events "
+                    f"WHERE kind=? AND unique_key IS NULL GROUP BY json_extract(body,'{field}')", (kind,))
+                while True:
+                    removed = db.execute(
+                        "DELETE FROM events WHERE id IN (SELECT id FROM events "
+                        "WHERE kind=? AND unique_key IS NULL AND id NOT IN (SELECT id FROM keep_event_ids) LIMIT ?)",
+                        (kind, batch)).rowcount
+                    total += removed
+                    db.commit()
+                    if removed < batch:
+                        break
+                db.execute("DELETE FROM keep_event_ids")
+        for kind in ('local_search_device', 'local_search_gpu'):
+            with self.connection() as db:
+                total += db.execute(
+                    "DELETE FROM events WHERE kind=? AND unique_key IS NULL AND id < (SELECT max(id) FROM events WHERE kind=?)",
+                    (kind, kind)).rowcount
+        if total:
+            diagnostic_event('storage.events.deduplicated', count=total)
+        return total
+
+    @observed('storage.prune_events')
+    def prune_events(self, max_age=EVENT_RETENTION_SECONDS, batch=2000):
+        """按 TTL 批量回收事件：非通知事件直接过期；已投递通知同样回收，未投递通知保留。"""
+        cutoff = time.time() - max_age
+        total = 0
+        while True:
+            with self.connection() as db:
+                removed = db.execute(
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events "
+                    "WHERE created<? AND (kind!='notification' OR delivered=1) LIMIT ?)",
+                    (cutoff, batch)).rowcount
+            total += removed
+            if removed < batch:
+                break
+        if total:
+            diagnostic_event('storage.events.pruned', count=total, retention_seconds=max_age)
+        return total
+
+    @observed('storage.compact')
+    def compact(self, minimum_bytes=COMPACT_MINIMUM_BYTES):
+        """回收已删除行遗留的空闲页；空闲空间不多时不做全库重写。"""
+        with self.lock:
+            probe = sqlite3.connect(self.path, timeout=30)
+            try:
+                page_size = probe.execute('PRAGMA page_size').fetchone()[0]
+                free = probe.execute('PRAGMA freelist_count').fetchone()[0] * page_size
+            finally:
+                probe.close()
+            if free < minimum_bytes:
+                return 0
+            # VACUUM 不能在事务内执行，使用独立连接并先截断 WAL。
+            db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+            try:
+                db.execute('PRAGMA journal_mode=WAL')
+                db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                db.execute('VACUUM')
+            finally:
+                db.close()
+        diagnostic_event('storage.compacted', freed_bytes=free)
+        return free
+
+    def maintain(self, max_age=EVENT_RETENTION_SECONDS, minimum_bytes=COMPACT_MINIMUM_BYTES):
+        """启动维护：折叠遗留重复事件、回收过期事件，再按需压缩数据库文件。"""
+        deduplicated = self.prune_duplicate_events()
+        removed = self.prune_events(max_age)
+        freed = self.compact(minimum_bytes)
+        return deduplicated, removed, freed
 
     @observed('storage.purge_account')
     def purge_account(self, account):
