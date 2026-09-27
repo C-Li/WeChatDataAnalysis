@@ -833,11 +833,30 @@ function getMainLogPath() {
   return path.join(dir, "desktop-main.log");
 }
 
+const LOG_ROTATE_BYTES = 4 * 1024 * 1024;
+let logRotationTick = 0;
+function rotateLogFileIfNeeded(file, maxBytes = LOG_ROTATE_BYTES, force = false) {
+  // 高频写日志时不必每次都 stat；每若干次检查一次即可。
+  if (!force) {
+    logRotationTick += 1;
+    if (logRotationTick % 256 !== 0) return;
+  }
+  try {
+    if (fs.statSync(file).size < maxBytes) return;
+    const backup = `${file}.1`;
+    try {
+      fs.rmSync(backup, { force: true });
+    } catch {}
+    fs.renameSync(file, backup);
+  } catch {}
+}
+
 function logMain(line) {
   const p = getMainLogPath();
   if (!p) return;
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
+    rotateLogFileIfNeeded(p);
     fs.appendFileSync(p, `[${nowIso()}] ${line}\n`, { encoding: "utf8" });
   } catch {}
 }
@@ -1985,6 +2004,7 @@ function attachBackendStdio(proc, logPath) {
   const attachedAt = Date.now();
   let outputChunks = 0;
   try {
+    rotateLogFileIfNeeded(logPath, 8 * 1024 * 1024, true);
     stream = fs.createWriteStream(logPath, { flags: "a" });
     stream.on("error", (err) => {
       logMain(`[main] child stdio log error path=${logPath}: ${err?.message || err}`);
