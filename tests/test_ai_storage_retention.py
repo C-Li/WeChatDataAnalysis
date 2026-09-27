@@ -72,6 +72,29 @@ def test_prune_events_keeps_undelivered_notifications(tmp_path):
     assert remaining[0]['kind'] == 'notification' and remaining[0]['delivered'] == 0
 
 
+def test_maintain_repairs_oversized_database_preserving_records(tmp_path):
+    store = AIStore(tmp_path)
+    store.put('config', {'enabled': True}, id='acct', account='acct')
+    now = time.time()
+    with store.connection() as db:
+        for index in range(300):
+            db.execute("INSERT INTO events(account,kind,body,unique_key,delivered,created) VALUES('','local_search_index',?,NULL,0,?)",
+                       (json.dumps({'id': 'job', 'index': index, 'pad': 'x' * 2000}), now))
+        db.execute("INSERT INTO events(account,kind,body,unique_key,delivered,created) VALUES('','notification','{\"n\":1}','k1',0,?)", (now,))
+        db.execute("INSERT INTO events(account,kind,body,unique_key,delivered,created) VALUES('','notification','{\"n\":2}','k2',1,?)", (now,))
+        before = store._database_bytes(db)
+    # 用极小阈值模拟遗留巨型库：应重建而不是长时间原地删除。
+    deduplicated, pruned, repaired = store.maintain(max_database_bytes=1)
+    assert repaired > 0
+    with store.connection() as db:
+        assert store._database_bytes(db) < before
+    # records 保留；未投递提醒保留，可再生的进度事件与已投递提醒丢弃。
+    assert store.get('config', 'acct')['enabled'] is True
+    events = store.events()
+    assert [event['kind'] for event in events] == ['notification']
+    assert events[0]['body']['n'] == 1
+
+
 def test_compact_reclaims_free_pages_after_prune(tmp_path):
     store = AIStore(tmp_path)
     for index in range(2000):

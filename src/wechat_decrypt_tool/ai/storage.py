@@ -3,6 +3,7 @@ from .diagnostics import observed, event as diagnostic_event
 import logging
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -17,6 +18,9 @@ from ..app_paths import get_output_dir
 EVENT_RETENTION_SECONDS = 24 * 3600
 # 事件表空闲页超过该阈值才执行 VACUUM，避免频繁全库重写。
 COMPACT_MINIMUM_BYTES = 64 * 1024 * 1024
+# 超过该体积的库不做原地删除/VACUUM（对遗留巨型库会放大 WAL），改为重建：
+# 仅保留 records 与未投递提醒，丢弃可再生的 events。
+MAINTENANCE_MAX_DATABASE_BYTES = 512 * 1024 * 1024
 
 SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS records (
@@ -252,12 +256,100 @@ class AIStore:
         diagnostic_event('storage.compacted', freed_bytes=free)
         return free
 
-    def maintain(self, max_age=EVENT_RETENTION_SECONDS, minimum_bytes=COMPACT_MINIMUM_BYTES):
-        """启动维护：折叠遗留重复事件、回收过期事件，再按需压缩数据库文件。"""
+    @observed('storage.repair')
+    def repair_oversized(self, max_database_bytes=MAINTENANCE_MAX_DATABASE_BYTES):
+        """重建过大的库：保留 records 与未投递提醒，丢弃可再生的 events。
+
+        对遗留巨型库，原地 DELETE + VACUUM 会把 WAL 放大到库体积且长时间占锁；
+        这里改为把少量存活数据复制到新库再原子替换，耗时与库体积无关。
+        返回重建前的库大小（字节），未触发或失败返回 0。
+        """
+        with self.lock:
+            try:
+                probe = sqlite3.connect(self.path, timeout=30)
+                try:
+                    database_bytes = self._database_bytes(probe)
+                finally:
+                    probe.close()
+                if database_bytes <= max_database_bytes:
+                    return 0
+
+                temporary = self.path.with_name(self.path.name + '.repair')
+                for suffix in ('', '-wal', '-shm'):
+                    try:
+                        os.remove(str(temporary) + suffix)
+                    except FileNotFoundError:
+                        pass
+
+                source = sqlite3.connect(self.path, timeout=30)
+                target = sqlite3.connect(temporary, timeout=30)
+                try:
+                    source.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                    target.executescript(SCHEMA_SQL)
+                    target.executemany(
+                        'INSERT INTO records(kind,id,account,body,updated) VALUES(?,?,?,?,?)',
+                        source.execute('SELECT kind,id,account,body,updated FROM records'))
+                    # 未投递提醒不可再生，随 records 一起保留；其余 events 只是进度快照。
+                    target.executemany(
+                        'INSERT INTO events(account,kind,body,unique_key,delivered,created) VALUES(?,?,?,?,?,?)',
+                        source.execute("SELECT account,kind,body,unique_key,delivered,created FROM events "
+                                       "WHERE kind='notification' AND delivered=0"))
+                    sequence = source.execute("SELECT seq FROM sqlite_sequence WHERE name='events'").fetchone()
+                    if sequence:
+                        target.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('events',?)", (sequence[0],))
+                    target.commit()
+                finally:
+                    source.close()
+                    target.close()
+
+                # 先原子替换主库，再清理旧的 WAL/SHM：即使替换失败，原库仍完整。
+                for attempt in range(4):
+                    try:
+                        os.replace(temporary, self.path)
+                        break
+                    except OSError as error:
+                        if attempt == 3:
+                            raise
+                        diagnostic_event('storage.repair.retry', level=logging.WARNING, error=error)
+                        time.sleep(0.3 * (attempt + 1))
+                for suffix in ('-wal', '-shm'):
+                    try:
+                        os.remove(str(self.path) + suffix)
+                    except FileNotFoundError:
+                        pass
+                diagnostic_event('storage.repaired', bytes_before=database_bytes)
+                return database_bytes
+            except Exception as error:
+                for suffix in ('', '-wal', '-shm'):
+                    try:
+                        os.remove(str(self.path.with_name(self.path.name + '.repair')) + suffix)
+                    except FileNotFoundError:
+                        pass
+                diagnostic_event('storage.repair.failed', level=logging.WARNING, error=error)
+                return 0
+
+    def maintain(self, max_age=EVENT_RETENTION_SECONDS, minimum_bytes=COMPACT_MINIMUM_BYTES,
+                 max_database_bytes=MAINTENANCE_MAX_DATABASE_BYTES):
+        """启动维护：折叠遗留重复事件、回收过期事件，再按需压缩数据库文件。
+
+        超过 `max_database_bytes` 的遗留巨型库改为重建（保留 records 与未投递提醒），
+        避免原地删除/VACUUM 长时间占锁并放大 WAL。
+        """
+        with self.connection() as db:
+            database_bytes = self._database_bytes(db)
+        if database_bytes > max_database_bytes:
+            repaired = self.repair_oversized(max_database_bytes)
+            return 0, 0, repaired
         deduplicated = self.prune_duplicate_events()
         removed = self.prune_events(max_age)
         freed = self.compact(minimum_bytes)
         return deduplicated, removed, freed
+
+    @staticmethod
+    def _database_bytes(db):
+        page_size = db.execute('PRAGMA page_size').fetchone()[0]
+        page_count = db.execute('PRAGMA page_count').fetchone()[0]
+        return page_size * page_count
 
     @observed('storage.purge_account')
     def purge_account(self, account):
