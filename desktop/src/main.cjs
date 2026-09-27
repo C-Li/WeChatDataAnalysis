@@ -1839,7 +1839,6 @@ function requestMainWindow(reason = "request") {
 
 function createTray() {
   if (tray) return tray;
-  if (!app.isPackaged) return null;
 
   const iconPath = getTrayIconPath();
   if (!iconPath) {
@@ -2545,8 +2544,7 @@ function createMainWindow() {
   });
 
   win.on("close", (event) => {
-    // In packaged builds, we default to "close -> minimize to tray" unless the user opts out.
-    if (!app.isPackaged) return;
+    // Default "close -> minimize to tray" (also in source mode) unless the user opts out.
     if (isQuitting) return;
     if (getCloseBehavior() !== "tray") return;
     if (!tray) return;
