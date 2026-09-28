@@ -356,6 +356,36 @@ class TestMcpRouter(unittest.TestCase):
         self.assertIn(("sessions", {"account": None, "limit": 50, "include_hidden": False, "include_official": False, "preview": "latest", "source": "auto"}), calls)
         self.assertTrue(any(kind == "messages" and kwargs.get("source") == "auto" for kind, kwargs in calls))
 
+    def test_get_messages_passes_time_range(self):
+        client = self._client()
+        calls = []
+
+        class FakeChatRouter:
+            def list_chat_messages(self, _request, **kwargs):
+                calls.append(kwargs)
+                return {"status": "success", "source": kwargs.get("source"), "messages": []}
+
+        with patch("wechat_decrypt_tool.mcp.tools._chat_router", return_value=FakeChatRouter()):
+            resp = client.post(
+                "/mcp",
+                json=self._rpc(
+                    "tools/call",
+                    {
+                        "name": "wechat.chat.get_messages",
+                        "arguments": {
+                            "username": "wxid_friend",
+                            "start_time": 1700000000,
+                            "end_time": 1700003600,
+                        },
+                    },
+                ),
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["start_time"], 1700000000)
+        self.assertEqual(calls[0]["end_time"], 1700003600)
+
     def test_mobile_recent_context_defaults_to_auto_source(self):
         client = self._client()
         calls = []

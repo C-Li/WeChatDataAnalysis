@@ -6508,6 +6508,8 @@ def list_chat_messages(
     scan_offset: int = 0,
     scan_limit: int = 320,
     source: Optional[str] = None,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
 ):
     handler_started_perf = time.perf_counter()
     handler_started_epoch_ms = time.time_ns() / 1_000_000
@@ -6529,6 +6531,18 @@ def list_chat_messages(
         scan_limit = 50
     if scan_limit > 2000:
         scan_limit = 2000
+
+    start_ts = int(start_time) if start_time is not None else None
+    end_ts = int(end_time) if end_time is not None else None
+    time_filter_active = start_ts is not None or end_ts is not None
+
+    def _in_time_range(item: dict[str, Any]) -> bool:
+        cts = int(item.get("createTime") or 0)
+        if start_ts is not None and cts < start_ts:
+            return False
+        if end_ts is not None and cts > end_ts:
+            return False
+        return True
 
     account_dir = _resolve_account_dir(account)
     source_requested = _normalize_chat_source(source)
@@ -6745,9 +6759,10 @@ def list_chat_messages(
             if want_types is not None:
                 merged = [m for m in merged if _normalize_render_type_key(m.get("renderType")) in want_types]
 
-            if want_types is None:
+            if want_types is None and not time_filter_active:
                 break
-            if (len(merged) >= (int(offset) + int(limit))) or (not has_more_any):
+            matched = sum(1 for m in merged if _in_time_range(m)) if time_filter_active else len(merged)
+            if (matched >= (int(offset) + int(limit))) or (not has_more_any):
                 break
 
             next_take = scan_take * 2 if scan_take > 0 else (int(limit) + int(offset))
@@ -6791,10 +6806,11 @@ def list_chat_messages(
             if progressive_filter:
                 break
 
-            if want_types is None:
+            if want_types is None and not time_filter_active:
                 break
 
-            if (len(merged) >= (int(offset) + int(limit))) or (not has_more_any):
+            matched = sum(1 for m in merged if _in_time_range(m)) if time_filter_active else len(merged)
+            if (matched >= (int(offset) + int(limit))) or (not has_more_any):
                 break
 
             next_take = scan_take * 2 if scan_take > 0 else (int(limit) + int(offset))
@@ -6818,6 +6834,7 @@ def list_chat_messages(
         source_norm != "realtime"
         and (source is None or not str(source).strip())
         and (not merged)
+        and not time_filter_active
         and int(offset) == 0
         and not account_prefers_decrypted_snapshot(account_dir)
     ):
@@ -7365,6 +7382,9 @@ def list_chat_messages(
             resource_conn.close()
         except Exception:
             pass
+
+    if time_filter_active:
+        merged = [m for m in merged if _in_time_range(m)]
 
     # Guard against duplicate message ids (observed in realtime mode).
     # Duplicate ids break Vue list rendering (duplicate keys) and can cause incorrect message display.

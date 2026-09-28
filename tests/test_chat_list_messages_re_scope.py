@@ -66,6 +66,59 @@ class TestChatListMessagesReScope(unittest.TestCase):
                         source="decrypted",
                     )
 
+    def test_list_chat_messages_filters_by_time_range(self):
+        from starlette.requests import Request
+
+        import wechat_decrypt_tool.routers.chat as chat
+
+        rows = [
+            {"id": "1", "sortSeq": 0, "createTime": 1000, "localId": 1, "type": 1, "renderType": "text", "content": "old"},
+            {"id": "2", "sortSeq": 0, "createTime": 2000, "localId": 2, "type": 1, "renderType": "text", "content": "mid"},
+            {"id": "3", "sortSeq": 0, "createTime": 3000, "localId": 3, "type": 1, "renderType": "text", "content": "new"},
+        ]
+
+        def fake_collect_chat_messages(**_kwargs):
+            return [dict(r) for r in rows], False, [], [], set()
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/chat/messages",
+            "raw_path": b"/api/chat/messages",
+            "query_string": b"",
+            "headers": [],
+            "client": ("testclient", 12345),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+        request = Request(scope)
+
+        with TemporaryDirectory() as td:
+            account_dir = Path(td) / "acc"
+            account_dir.mkdir(parents=True, exist_ok=True)
+
+            with patch.object(chat, "_resolve_account_dir", return_value=account_dir), patch.object(
+                chat, "_iter_message_db_paths", return_value=[account_dir / "msg_0.db"]
+            ), patch.object(chat, "_collect_chat_messages", side_effect=fake_collect_chat_messages), patch.object(
+                chat, "_postprocess_transfer_messages", lambda _merged: None
+            ), patch.object(chat, "_load_contact_rows", return_value={}), patch.object(
+                chat, "_query_head_image_usernames", return_value=[]
+            ), patch.object(chat, "_load_group_nickname_map", return_value={}), patch.object(
+                chat, "_load_enterprise_contact_info", return_value={}
+            ):
+                resp = chat.list_chat_messages(
+                    request=request,
+                    username="wxid_friend",
+                    account="acc",
+                    source="decrypted",
+                    start_time=1500,
+                    end_time=2500,
+                    limit=10,
+                )
+
+        self.assertEqual(resp["status"], "success")
+        self.assertEqual([m["id"] for m in resp["messages"]], ["2"])
+
 
 if __name__ == "__main__":
     unittest.main()
