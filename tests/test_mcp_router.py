@@ -506,7 +506,7 @@ class TestMcpRouter(unittest.TestCase):
         self.assertEqual(structured["index"]["indexMtimeNs"], "9007199254740993")
         self.assertEqual(structured["hits"][0]["serverId"], "9007199254740993")
         self.assertEqual(structured["limit"], 20)
-        self.assertIn('"serverId": "9007199254740993"', resp.json()["result"]["content"][0]["text"])
+        self.assertIn('"serverId":"9007199254740993"', resp.json()["result"]["content"][0]["text"])
         tools = {tool["name"]: tool for tool in client.post("/mcp", json=self._rpc("tools/list")).json()["result"]["tools"]}
         self.assertEqual(tools["wechat.chat.resolve_app_message"]["inputSchema"]["properties"]["server_id"]["type"], "string")
 

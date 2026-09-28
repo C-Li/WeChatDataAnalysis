@@ -117,7 +117,7 @@ class McpToolRegistry:
         if inspect.isawaitable(result):
             result = await result
         encoded = _stringify_unsafe_integers(jsonable_encoder(result))
-        text = json.dumps(encoded, ensure_ascii=False, indent=2)
+        text = json.dumps(encoded, ensure_ascii=False, separators=(",", ":"))
         is_error = isinstance(encoded, dict) and str(encoded.get("status") or "").lower() == "error"
         return {
             "content": [{"type": "text", "text": text}],

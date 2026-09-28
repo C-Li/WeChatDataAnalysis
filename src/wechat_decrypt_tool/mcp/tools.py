@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from typing import Any, Callable, Optional
@@ -297,9 +298,9 @@ def _resolve_contact(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any
     candidates = []
     q_lower = query.lower()
     for item in list(base.get("contacts") or []):
-        hay = " ".join(str(item.get(k) or "") for k in ("username", "remark", "nickname", "name", "displayName", "alias")).lower()
+        hay = " ".join(str(item.get(k) or "") for k in ("username", "remark", "nickname", "name", "displayName", "alias", "pinyinKey", "pinyinInitial")).lower()
         score = 0
-        if query in hay:
+        if q_lower in hay:
             score += 60
         if hay.startswith(q_lower):
             score += 20
@@ -606,6 +607,26 @@ def _pay_records(args: dict[str, Any], _: McpToolContext) -> dict[str, Any]:
     )
 
 
+def _analytics_query(args: dict[str, Any], _: McpToolContext) -> dict[str, Any]:
+    return _clip_deep(
+        _chat_router().get_chat_message_aggregates(
+            account=_account_arg(args),
+            dimension=_str(args, "dimension", "session") or "session",
+            username=_opt_str(args, "username") or _opt_str(args, "session_id"),
+            message_q=_opt_str(args, "message_q") or _opt_str(args, "query"),
+            limit=_int(args, "limit", 20, minimum=1, maximum=500),
+            start_time=_opt_int(args, "start_time"),
+            end_time=_opt_int(args, "end_time"),
+            render_types=_opt_str(args, "render_types"),
+            session_type=_opt_str(args, "session_type"),
+            include_hidden=_bool(args, "include_hidden", False),
+            include_official=_bool(args, "include_official", False),
+            source=_chat_source(args),
+        ),
+        max_items=120,
+    )
+
+
 def _wrapped_meta(args: dict[str, Any], _: McpToolContext) -> dict[str, Any]:
     svc = _wrapped_service()
     account_dir = _resolve_account_dir(_account_arg(args))
@@ -819,38 +840,38 @@ async def _mobile_home_snapshot(args: dict[str, Any], ctx: McpToolContext) -> di
         "warnings": [],
     }
 
-    account_info = _safe_call("accountInfo", lambda: _get_account_info({"account": account} if account else {}, ctx))
-    if account_info["ok"]:
-        payload["accountInfo"] = account_info["data"]
-    else:
-        payload["warnings"].append(account_info)
-
-    sessions = _safe_call(
-        "sessions",
-        lambda: _list_sessions(
-            {
-                "account": account,
-                "limit": session_limit,
-                "offset": 0,
-                "include_hidden": include_hidden,
-                "include_official": include_official,
-                "preview": _str(args, "preview", "latest") or "latest",
-                "source": _chat_source(args),
-            },
-            ctx,
+    sections: list[tuple[str, Any]] = [
+        ("accounts", asyncio.to_thread(_safe_call, "accounts", lambda: _list_accounts({}, ctx))),
+        ("accountInfo", asyncio.to_thread(_safe_call, "accountInfo", lambda: _get_account_info({"account": account} if account else {}, ctx))),
+        (
+            "sessions",
+            asyncio.to_thread(
+                _safe_call,
+                "sessions",
+                lambda: _list_sessions(
+                    {
+                        "account": account,
+                        "limit": session_limit,
+                        "offset": 0,
+                        "include_hidden": include_hidden,
+                        "include_official": include_official,
+                        "preview": _str(args, "preview", "latest") or "latest",
+                        "source": _chat_source(args),
+                    },
+                    ctx,
+                ),
+            ),
         ),
-    )
-    if sessions["ok"]:
-        payload["sessions"] = sessions["data"]
-    else:
-        payload["warnings"].append(sessions)
-
+    ]
     if include_moments and moments_limit > 0:
-        moments = _safe_call("moments", lambda: _sns_timeline({"account": account, "limit": moments_limit, "offset": 0}, ctx))
-        if moments["ok"]:
-            payload["moments"] = moments["data"]
+        sections.append(("moments", asyncio.to_thread(_safe_call, "moments", lambda: _sns_timeline({"account": account, "limit": moments_limit, "offset": 0}, ctx))))
+
+    outcomes = await asyncio.gather(*(coro for _, coro in sections))
+    for (key, _), result in zip(sections, outcomes):
+        if result["ok"]:
+            payload[key] = result["data"]
         else:
-            payload["warnings"].append(moments)
+            payload["warnings"].append(result)
 
     return _clip_deep(payload, max_items=120)
 
@@ -875,36 +896,28 @@ async def _mobile_search_context(args: dict[str, Any], ctx: McpToolContext) -> d
         "warnings": [],
     }
 
-    messages = _safe_call("messages", lambda: None)
-    try:
-        messages["data"] = await _search_messages({"account": account, "query": query, "limit": limit, "offset": _int(args, "offset", 0, minimum=0), "source": chat_source}, ctx)
-        messages["ok"] = True
-    except Exception as exc:
-        messages = {"ok": False, "error": str(exc), "section": "messages"}
-    if messages["ok"]:
-        payload["messages"] = messages["data"]
-    else:
-        payload["warnings"].append(messages)
+    async def _search_messages_section() -> dict[str, Any]:
+        try:
+            data = await _search_messages({"account": account, "query": query, "limit": limit, "offset": _int(args, "offset", 0, minimum=0), "source": chat_source}, ctx)
+            return {"ok": True, "section": "messages", "data": data}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "section": "messages"}
 
-    sessions = _safe_call("sessions", lambda: _resolve_session({"account": account, "query": query, "limit": limit, "source": chat_source}, ctx))
-    if sessions["ok"]:
-        payload["sessions"] = sessions["data"]
-    else:
-        payload["warnings"].append(sessions)
-
+    sections: list[tuple[str, Any]] = [
+        ("messages", _search_messages_section()),
+        ("sessions", asyncio.to_thread(_safe_call, "sessions", lambda: _resolve_session({"account": account, "query": query, "limit": limit, "source": chat_source}, ctx))),
+    ]
     if include_contacts:
-        contacts = _safe_call("contacts", lambda: _resolve_contact({"account": account, "query": query, "limit": limit}, ctx))
-        if contacts["ok"]:
-            payload["contacts"] = contacts["data"]
-        else:
-            payload["warnings"].append(contacts)
-
+        sections.append(("contacts", asyncio.to_thread(_safe_call, "contacts", lambda: _resolve_contact({"account": account, "query": query, "limit": limit}, ctx))))
     if include_moments:
-        moments = _safe_call("moments", lambda: _sns_timeline({"account": account, "query": query, "limit": limit, "offset": 0}, ctx))
-        if moments["ok"]:
-            payload["moments"] = moments["data"]
+        sections.append(("moments", asyncio.to_thread(_safe_call, "moments", lambda: _sns_timeline({"account": account, "query": query, "limit": limit, "offset": 0}, ctx))))
+
+    outcomes = await asyncio.gather(*(coro for _, coro in sections))
+    for (key, _), result in zip(sections, outcomes):
+        if result["ok"]:
+            payload[key] = result["data"]
         else:
-            payload["warnings"].append(moments)
+            payload["warnings"].append(result)
 
     return _clip_deep(payload, max_items=120)
 
@@ -928,44 +941,49 @@ async def _mobile_session_bundle(args: dict[str, Any], ctx: McpToolContext) -> d
         "warnings": [],
     }
 
-    session = _safe_call("session", lambda: _resolve_session({"account": account, "query": username, "limit": 5, "source": chat_source}, ctx))
-    if session["ok"]:
-        payload["session"] = session["data"]
-    else:
-        payload["warnings"].append(session)
-
-    messages = _safe_call(
-        "messages",
-        lambda: _list_messages(
-            {
-                "account": account,
-                "username": username,
-                "limit": limit,
-                "offset": offset,
-                "order": _str(args, "order", "desc") or "desc",
-                "render_types": _opt_str(args, "render_types"),
-                "source": chat_source,
-            },
-            ctx,
-        ),
-    )
-    if messages["ok"]:
-        payload["messages"] = messages["data"]
-    else:
-        payload["warnings"].append(messages)
-
-    if args.get("year") not in (None, "") and args.get("month") not in (None, ""):
-        daily = _safe_call(
-            "dailyCounts",
-            lambda: _message_daily_counts(
-                {"account": account, "username": username, "year": _int(args, "year"), "month": _int(args, "month"), "source": chat_source},
-                ctx,
+    sections: list[tuple[str, Any]] = [
+        ("session", asyncio.to_thread(_safe_call, "session", lambda: _resolve_session({"account": account, "query": username, "limit": 5, "source": chat_source}, ctx))),
+        (
+            "messages",
+            asyncio.to_thread(
+                _safe_call,
+                "messages",
+                lambda: _list_messages(
+                    {
+                        "account": account,
+                        "username": username,
+                        "limit": limit,
+                        "offset": offset,
+                        "order": _str(args, "order", "desc") or "desc",
+                        "render_types": _opt_str(args, "render_types"),
+                        "source": chat_source,
+                    },
+                    ctx,
+                ),
             ),
+        ),
+    ]
+    if args.get("year") not in (None, "") and args.get("month") not in (None, ""):
+        sections.append(
+            (
+                "dailyCounts",
+                asyncio.to_thread(
+                    _safe_call,
+                    "dailyCounts",
+                    lambda: _message_daily_counts(
+                        {"account": account, "username": username, "year": _int(args, "year"), "month": _int(args, "month"), "source": chat_source},
+                        ctx,
+                    ),
+                ),
+            )
         )
-        if daily["ok"]:
-            payload["dailyCounts"] = daily["data"]
+
+    outcomes = await asyncio.gather(*(coro for _, coro in sections))
+    for (key, _), result in zip(sections, outcomes):
+        if result["ok"]:
+            payload[key] = result["data"]
         else:
-            payload["warnings"].append(daily)
+            payload["warnings"].append(result)
 
     return _clip_deep(payload, max_items=140)
 
@@ -1075,7 +1093,7 @@ async def _mobile_overview(args: dict[str, Any], ctx: McpToolContext) -> dict[st
     )
 
 
-def _mobile_resolve_target(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
+async def _mobile_resolve_target(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
     query = _str(args, "query")
     if not query:
         raise ValueError("query is required.")
@@ -1087,12 +1105,23 @@ def _mobile_resolve_target(args: dict[str, Any], ctx: McpToolContext) -> dict[st
     warnings: list[dict[str, Any]] = []
 
     def extend(kind: str, result: dict[str, Any]) -> None:
-        for idx, item in enumerate(_first_list(result, ("candidates", "users", "accounts", "sessions", "contacts", "items"))[:limit]):
+        for item in _first_list(result, ("candidates", "users", "accounts", "sessions", "contacts", "items"))[:limit]:
             if not isinstance(item, dict):
                 continue
             username = str(item.get("username") or item.get("id") or item.get("userName") or "").strip()
             display = _candidate_display(item)
-            confidence = int(item.get("confidence") or max(20, 80 - idx * 8))
+            confidence = int(item.get("confidence") or 0)
+            if confidence <= 0:
+                # 朋友圈用户/公众号无上游置信度时，依据真实匹配证据打分，避免编造高分干扰排序与 ambiguous 判断。
+                hay = " ".join(str(v or "") for v in (username, display, item.get("alias"), item.get("remark"), item.get("nickname"))).lower()
+                q = query.lower()
+                confidence = 20
+                if q and q in hay:
+                    confidence += 50
+                if q and username.lower() == q:
+                    confidence += 20
+                elif q and display.lower().startswith(q):
+                    confidence += 10
             candidates.append(
                 {
                     "kind": kind,
@@ -1115,8 +1144,8 @@ def _mobile_resolve_target(args: dict[str, Any], ctx: McpToolContext) -> dict[st
     if target_type in {"auto", "biz"}:
         tasks.append(("biz", lambda: _biz_accounts({"account": account}, ctx)))
 
-    for kind, func in tasks:
-        result = _safe_call(kind, func)
+    outcomes = await asyncio.gather(*(asyncio.to_thread(_safe_call, kind, func) for kind, func in tasks))
+    for (kind, _), result in zip(tasks, outcomes):
         if result["ok"]:
             extend(kind, result["data"])
         else:
@@ -1170,46 +1199,48 @@ async def _mobile_search_chat(args: dict[str, Any], ctx: McpToolContext) -> dict
         selected = hits[: min(3, len(hits))]
         if context_mode == "selected" and args.get("anchor_id"):
             selected = [{"username": _opt_str(args, "username"), "message_id": _str(args, "anchor_id")}]
-        for item in selected:
+
+        async def _fetch_context(item: Any) -> dict[str, Any] | None:
             if not isinstance(item, dict):
-                continue
+                return None
             username = str(item.get("username") or item.get("session") or item.get("talker") or _opt_str(args, "username") or "").strip()
             anchor_id = str(item.get("message_id") or item.get("msg_id") or item.get("id") or item.get("local_id") or item.get("anchor_id") or "").strip()
             if not username or not anchor_id:
-                continue
+                return None
             try:
-                contexts.append(
-                    await _messages_around(
-                        {
-                            "account": account,
-                            "username": username,
-                            "anchor_id": anchor_id,
-                            "before": _int(args, "before", 3, minimum=0, maximum=5),
-                            "after": _int(args, "after", 3, minimum=0, maximum=5),
-                            "source": _chat_source(args),
-                        },
-                        ctx,
-                    )
+                return await _messages_around(
+                    {
+                        "account": account,
+                        "username": username,
+                        "anchor_id": anchor_id,
+                        "before": _int(args, "before", 3, minimum=0, maximum=5),
+                        "after": _int(args, "after", 3, minimum=0, maximum=5),
+                        "source": _chat_source(args),
+                    },
+                    ctx,
                 )
             except Exception as exc:
                 warnings.append({"section": "context", "ok": False, "error": str(exc), "username": username, "anchorId": anchor_id})
-    return _clip_deep(
-        {
-            "status": "success",
-            "ok": True,
-            "account": account,
-            "query": query,
-            "limit": limit,
-            "offset": offset,
-            "hasMore": len(hits) >= limit,
-            "nextCursor": str(offset + limit) if len(hits) >= limit else None,
-            "hits": hits,
-            "raw": search_payload,
-            "contexts": contexts,
-            "warnings": warnings,
-        },
-        max_items=120,
-    )
+                return None
+
+        contexts = [c for c in await asyncio.gather(*(_fetch_context(item) for item in selected)) if c is not None]
+    payload: dict[str, Any] = {
+        "status": "success",
+        "ok": True,
+        "account": account,
+        "query": query,
+        "limit": limit,
+        "offset": offset,
+        "hasMore": len(hits) >= limit,
+        "nextCursor": str(offset + limit) if len(hits) >= limit else None,
+        "hits": hits,
+        "contexts": contexts,
+        "warnings": warnings,
+    }
+    if not hits:
+        # hits 已覆盖正常结果；仅在无命中时保留原始搜索负载用于诊断，避免响应体翻倍。
+        payload["raw"] = search_payload
+    return _clip_deep(payload, max_items=120)
 
 
 async def _mobile_get_chat_context(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
@@ -1217,7 +1248,7 @@ async def _mobile_get_chat_context(args: dict[str, Any], ctx: McpToolContext) ->
     target = _str(args, "target")
     chat_source = _chat_source(args)
     if not username and target:
-        resolved = _mobile_resolve_target({"account": _account_arg(args), "query": target, "target_type": "session", "limit": 1, "source": chat_source}, ctx)
+        resolved = await _mobile_resolve_target({"account": _account_arg(args), "query": target, "target_type": "session", "limit": 1, "source": chat_source}, ctx)
         best = resolved.get("best") or {}
         username = str(best.get("username") or best.get("id") or "").strip()
     if not username:
@@ -1273,18 +1304,18 @@ async def _mobile_get_chat_context(args: dict[str, Any], ctx: McpToolContext) ->
     )
 
 
-def _mobile_search_moments(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
+async def _mobile_search_moments(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
     account = _account_arg(args)
     query = _opt_str(args, "query") or _opt_str(args, "q")
     usernames = _list_str(args, "usernames")
     poster = _opt_str(args, "poster")
     warnings: list[dict[str, Any]] = []
     if poster and not usernames:
-        resolved = _safe_call("poster", lambda: _mobile_resolve_target({"account": account, "query": poster, "target_type": "moments_user", "limit": 5}, ctx))
-        if resolved["ok"]:
-            usernames = [str(c.get("username") or c.get("id") or "").strip() for c in (resolved["data"].get("candidates") or []) if str(c.get("username") or c.get("id") or "").strip()]
-        else:
-            warnings.append(resolved)
+        try:
+            resolved = await _mobile_resolve_target({"account": account, "query": poster, "target_type": "moments_user", "limit": 5}, ctx)
+            usernames = [str(c.get("username") or c.get("id") or "").strip() for c in (resolved.get("candidates") or []) if str(c.get("username") or c.get("id") or "").strip()]
+        except Exception as exc:
+            warnings.append({"section": "poster", "ok": False, "error": str(exc)})
     result = _sns_timeline(
         {
             "account": account,
@@ -1295,7 +1326,20 @@ def _mobile_search_moments(args: dict[str, Any], ctx: McpToolContext) -> dict[st
         },
         ctx,
     )
-    return _clip_deep({"status": "success", "ok": True, "account": account, "query": query, "usernames": usernames, "posts": _first_list(result), "raw": result, "warnings": warnings}, max_items=100)
+    posts = _first_list(result)
+    payload: dict[str, Any] = {
+        "status": "success",
+        "ok": True,
+        "account": account,
+        "query": query,
+        "usernames": usernames,
+        "posts": posts,
+        "warnings": warnings,
+    }
+    if not posts:
+        # 无命中时保留原始时间线负载用于诊断，正常情况 posts 已包含全部信息。
+        payload["raw"] = result
+    return _clip_deep(payload, max_items=100)
 
 
 def _mobile_get_media_links(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
@@ -1448,6 +1492,25 @@ def _install_tools() -> None:
     _register("wechat.analytics.get_wrapped_meta", "Return annual wrapped manifest.", object_schema({**COMMON_ACCOUNT, "year": int_schema("Optional year.")}), _wrapped_meta, package="wechat.analytics")
     _register("wechat.analytics.get_wrapped_card", "Return one annual wrapped card.", object_schema({**COMMON_ACCOUNT, "year": int_schema("Optional year."), "card_id": int_schema("Card id.", minimum=0)}, required=["card_id"]), _wrapped_card, package="wechat.analytics")
     _register("wechat.analytics.get_wrapped_annual", "Return full annual wrapped data. Prefer meta/card for mobile clients.", object_schema({**COMMON_ACCOUNT, "year": int_schema("Optional year.")}), _wrapped_annual, package="wechat.analytics")
+    _register(
+        "wechat.analytics.query",
+        "Aggregate message counts across sessions in one call from the chat search index: dimension=session (who you chatted with most), sender (who sent most), or type (message type breakdown). Supports time range, keyword, session scope, and render type filters.",
+        object_schema({
+            **COMMON_ACCOUNT,
+            **CHAT_SOURCE,
+            "dimension": string_schema("session, sender, or type.", enum=["session", "sender", "type"], default="session"),
+            "username": string_schema("Optional session username to scope the aggregation."),
+            "message_q": string_schema("Optional message keyword filter."),
+            "query": string_schema("Alias for message_q."),
+            "limit": int_schema("Maximum rows.", minimum=1, maximum=500),
+            "start_time": int_schema("Optional Unix seconds start.", minimum=0),
+            "end_time": int_schema("Optional Unix seconds end.", minimum=0),
+            "render_types": string_schema("Optional comma-separated render type filter."),
+            "session_type": string_schema("group or single."),
+        }),
+        _analytics_query,
+        package="wechat.analytics",
+    )
 
     _register("wechat.media.get_avatar_url", "Build a URL for a contact avatar.", object_schema({**COMMON_ACCOUNT, "username": string_schema("Contact username.")}, required=["username"]), _avatar_url, package="wechat.media")
     _register(

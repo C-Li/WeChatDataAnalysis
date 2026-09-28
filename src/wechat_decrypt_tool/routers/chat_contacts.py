@@ -1433,9 +1433,19 @@ def _matches_keyword(contact: dict[str, Any], keyword: str) -> bool:
         contact.get("country", ""),
         contact.get("province", ""),
         contact.get("city", ""),
+        contact.get("pinyinKey", ""),
+        contact.get("pinyinInitial", ""),
     ]
     for field in fields:
         if kw in _normalize_text(field).lower():
+            return True
+
+    # 拼音兜底：按需计算全拼/首字母（如 "zw" 命中 "张伟"）。放在普通字段之后，避免对已命中的联系人做拼音转换。
+    name_for_pinyin = _normalize_text(contact.get("displayName")) or _normalize_text(contact.get("username"))
+    if name_for_pinyin:
+        if kw in _build_contact_pinyin_key(name_for_pinyin):
+            return True
+        if kw in _build_contact_pinyin_initial(name_for_pinyin):
             return True
     return False
 

@@ -3074,6 +3074,183 @@ async def chat_search_index_senders(
     }
 
 
+def get_chat_message_aggregates(
+    *,
+    account: Optional[str] = None,
+    dimension: str = "session",
+    username: Optional[str] = None,
+    message_q: Optional[str] = None,
+    limit: int = 20,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
+    render_types: Optional[str] = None,
+    session_type: Optional[str] = None,
+    include_hidden: bool = False,
+    include_official: bool = False,
+    source: Optional[str] = None,
+):
+    """基于聊天搜索索引做跨会话消息聚合（供 MCP 使用，不暴露 HTTP 路由）。
+
+    dimension=session 时回答"某段时间和谁聊得最多"，sender 时回答"谁发言最多"，
+    type 时给出消息类型分布，均支持时间范围与关键词过滤，一次查询避免客户端翻页聚合。
+    """
+    dimension_norm = str(dimension or "session").strip().lower()
+    if dimension_norm not in {"session", "sender", "type"}:
+        dimension_norm = "session"
+    if limit <= 0:
+        limit = 20
+    if limit > 500:
+        limit = 500
+
+    username = str(username or "").strip() or None
+    session_type_norm = _normalize_session_type(session_type)
+    message_q = str(message_q or "").strip() or None
+
+    account_dir = _resolve_account_dir(account)
+    source_requested = _normalize_chat_source(source)
+    index_status = get_chat_search_index_status(account_dir, source=source_requested)
+    index = dict(index_status.get("index") or {})
+    build = dict(index.get("build") or {})
+    build_status = str(build.get("status") or "").strip()
+
+    if (not index.get("ready")) and build_status not in {"building", "error"}:
+        start_chat_search_index_build(account_dir, rebuild=bool(index.get("exists")), source=source_requested)
+        index_status = get_chat_search_index_status(account_dir, source=source_requested)
+        index = dict(index_status.get("index") or {})
+        build = dict(index.get("build") or {})
+        build_status = str(build.get("status") or "").strip()
+
+    if build_status == "error":
+        return {
+            "status": "index_error",
+            "account": account_dir.name,
+            "dimension": dimension_norm,
+            "items": [],
+            "index": index,
+            "message": str(build.get("error") or "Search index build failed."),
+        }
+
+    if not index.get("ready"):
+        return {
+            "status": "index_building",
+            "account": account_dir.name,
+            "dimension": dimension_norm,
+            "items": [],
+            "index": index,
+            "message": "Search index is building. Please retry in a moment.",
+        }
+
+    group_expr = {"session": "username", "sender": "sender_username", "type": "render_type"}[dimension_norm]
+
+    conn = sqlite3.connect(str(get_chat_search_index_db_path(account_dir)))
+    conn.row_factory = sqlite3.Row
+    try:
+        where_parts: list[str] = []
+        params: list[Any] = []
+
+        if dimension_norm == "sender":
+            where_parts.append("sender_username <> ''")
+
+        if message_q is not None:
+            fts_query = _build_fts_query(message_q)
+            if fts_query:
+                where_parts.insert(0, "message_fts MATCH ?")
+                params.append(fts_query)
+
+        if username is not None:
+            where_parts.append("username = ?")
+            params.append(username)
+        elif session_type_norm == "group":
+            where_parts.append("username LIKE ?")
+            params.append("%@chatroom")
+        elif session_type_norm == "single":
+            where_parts.append("username NOT LIKE ?")
+            params.append("%@chatroom")
+
+        want_types: Optional[set[str]] = None
+        if render_types is not None:
+            parts = [p.strip() for p in str(render_types or "").split(",") if p.strip()]
+            want_types = {p for p in parts if p} or None
+        if want_types is not None:
+            types_sorted = sorted(want_types)
+            placeholders = ",".join(["?"] * len(types_sorted))
+            where_parts.append(f"render_type IN ({placeholders})")
+            params.extend(types_sorted)
+
+        start_ts = int(start_time) if start_time is not None else None
+        end_ts = int(end_time) if end_time is not None else None
+        if start_ts is not None and start_ts < 0:
+            start_ts = 0
+        if end_ts is not None and end_ts < 0:
+            end_ts = 0
+        if start_ts is not None:
+            where_parts.append("CAST(create_time AS INTEGER) >= ?")
+            params.append(int(start_ts))
+        if end_ts is not None:
+            where_parts.append("CAST(create_time AS INTEGER) <= ?")
+            params.append(int(end_ts))
+        if not include_hidden:
+            where_parts.append("CAST(is_hidden AS INTEGER) = 0")
+        if not include_official:
+            where_parts.append("CAST(is_official AS INTEGER) = 0")
+
+        where_sql = " AND ".join(where_parts) if where_parts else "1=1"
+        rows = conn.execute(
+            f"""
+            SELECT
+                {group_expr} AS group_key,
+                COUNT(*) AS c,
+                MAX(CAST(create_time AS INTEGER)) AS last_ts
+            FROM message_fts
+            WHERE {where_sql}
+            GROUP BY {group_expr}
+            ORDER BY c DESC
+            LIMIT ?
+            """,
+            params + [int(limit)],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    keys = [str(r["group_key"] or "").strip() for r in rows if r and r["group_key"]]
+    contact_rows: dict[Any, Any] = {}
+    if dimension_norm in {"session", "sender"} and keys:
+        contact_rows = _load_contact_rows(account_dir / "contact.db", keys)
+
+    items: list[dict[str, Any]] = []
+    aggregated_total = 0
+    for r in rows:
+        key = str(r["group_key"] or "").strip()
+        if not key:
+            continue
+        cnt = int(r["c"] or 0)
+        aggregated_total += cnt
+        item: dict[str, Any] = {"key": key, "count": cnt, "lastTimestamp": int(r["last_ts"] or 0)}
+        if dimension_norm in {"session", "sender"}:
+            row = contact_rows.get(key)
+            item["username"] = key
+            item["displayName"] = _pick_display_name(row, key) if row is not None else key
+            if dimension_norm == "session":
+                item["isGroup"] = key.endswith("@chatroom")
+        else:
+            item["renderType"] = key
+        items.append(item)
+
+    return {
+        "status": "success",
+        "account": account_dir.name,
+        "dimension": dimension_norm,
+        "scope": "conversation" if username else "global",
+        "items": items,
+        "aggregatedCount": aggregated_total,
+        "index": {
+            "exists": bool(index.get("exists")),
+            "ready": bool(index.get("ready")),
+            "buildStatus": str(build_status or ""),
+        },
+    }
+
+
 def _append_full_messages_from_rows(
     *,
     merged: list[dict[str, Any]],

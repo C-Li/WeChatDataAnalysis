@@ -113,15 +113,46 @@ def generate_mcp_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+_SETTINGS_CACHE: dict = {"path": None, "mtime": None, "data": None}
+
+
 def _read_runtime_settings() -> dict:
     path = get_runtime_settings_path()
     try:
-        if not path.is_file():
-            return {}
-        data = json.loads(path.read_text(encoding="utf-8") or "{}")
-        return data if isinstance(data, dict) else {}
+        stat = path.stat() if path.is_file() else None
     except Exception:
-        return {}
+        stat = None
+
+    # mtime 缓存：MCP 每个请求都要校验 token，避免每次都读盘；写入方在同一进程内会刷新缓存。
+    cached_path = _SETTINGS_CACHE.get("path")
+    cached_mtime = _SETTINGS_CACHE.get("mtime")
+    cached_data = _SETTINGS_CACHE.get("data")
+    if (
+        stat is not None
+        and cached_path == str(path)
+        and cached_mtime is not None
+        and cached_mtime == stat.st_mtime
+        and isinstance(cached_data, dict)
+    ):
+        return cached_data
+
+    data: dict = {}
+    try:
+        if stat is not None:
+            loaded = json.loads(path.read_text(encoding="utf-8") or "{}")
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+
+    _SETTINGS_CACHE.update(
+        {
+            "path": str(path),
+            "mtime": stat.st_mtime if stat is not None else None,
+            "data": data,
+        }
+    )
+    return data
 
 
 def _write_runtime_settings(data: dict) -> None:
@@ -131,18 +162,25 @@ def _write_runtime_settings(data: dict) -> None:
     except Exception:
         return
 
-    try:
-        cleaned = data if isinstance(data, dict) else {}
-        if not cleaned:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return
+    cleaned = data if isinstance(data, dict) else {}
+    if not cleaned:
+        try:
+            path.unlink(missing_ok=True)
+            _SETTINGS_CACHE.update({"path": str(path), "mtime": None, "data": {}})
+        except Exception:
+            pass
+        return
 
+    try:
         path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         return
+
+    try:
+        stat = path.stat()
+        _SETTINGS_CACHE.update({"path": str(path), "mtime": stat.st_mtime, "data": cleaned})
+    except Exception:
+        _SETTINGS_CACHE.update({"path": str(path), "mtime": None, "data": {}})
 
 
 def get_runtime_settings_path() -> Path:
