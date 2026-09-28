@@ -1458,6 +1458,32 @@ def _chat_voice_url(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]
     return _media_url("/api/chat/media/voice", args, ctx, ["server_id", "account"])
 
 
+def _voice_transcribe(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
+    server_id = _opt_int(args, "server_id") or _opt_int(args, "msg_svr_id")
+    if not server_id:
+        raise ValueError("server_id is required.")
+    from ..voice_transcription import (
+        VoiceTranscriptionError,
+        acquire_voice_transcription_service_lease,
+        capture_voice_transcript_cache_generation,
+    )
+
+    cache_generation = capture_voice_transcript_cache_generation()
+    lease = acquire_voice_transcription_service_lease()
+    try:
+        lease.service.ensure_available()
+        return lease.service.transcribe_voice(
+            account_dir=_resolve_account_dir(_account_arg(args)),
+            server_id=int(server_id),
+            force=_bool(args, "force", False),
+            cache_generation=cache_generation,
+        )
+    except VoiceTranscriptionError as exc:
+        return {"status": "error", "code": exc.code, "message": exc.user_message}
+    finally:
+        lease.release()
+
+
 def _tools_catalog(args: dict[str, Any], _: McpToolContext) -> dict[str, Any]:
     package = _opt_str(args, "package")
     tools = MCP_REGISTRY.list_tools()["tools"]
@@ -1611,6 +1637,18 @@ def _install_tools() -> None:
         **COMMON_ACCOUNT,
         "server_id": int_schema("语音消息 server_id。"),
     }, additional_properties=True), _chat_voice_url, package="wechat.media")
+    _register(
+        "wechat.voice.transcribe",
+        "Opt-in: transcribe one chat voice message to text with the local Whisper model. Requires the voice model downloaded and enabled in the app; results are cached locally.",
+        object_schema({
+            **COMMON_ACCOUNT,
+            "server_id": int_schema("Voice message server_id.", minimum=1),
+            "msg_svr_id": int_schema("Compatible alias for server_id.", minimum=1),
+            "force": bool_schema("Ignore the local transcript cache and re-transcribe.", default=False),
+        }, required=["server_id"]),
+        _voice_transcribe,
+        package="wechat.media",
+    )
     _register("wechat.media.get_decrypted_resource_url", "Build a URL for a previously decrypted resource by MD5.", object_schema({**COMMON_ACCOUNT, "md5": string_schema("32-character resource md5.")}, required=["md5"]), _decrypted_media_resource_url, package="wechat.media")
     _register("wechat.media.get_proxy_image_url", "Build a backend proxy URL for a remote chat image.", object_schema({"url": string_schema("Remote image URL.")}, required=["url"]), _chat_proxy_image_url, package="wechat.media")
     _register("wechat.media.get_favicon_url", "Build a backend URL for a web page favicon.", object_schema({"url": string_schema("Page URL.")}, required=["url"]), _chat_favicon_url, package="wechat.media")

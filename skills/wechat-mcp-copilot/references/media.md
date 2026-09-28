@@ -10,6 +10,7 @@ Use this for image, video, emoji, file, link, and voice resources.
 - `wechat.media.get_chat_video_thumb_url`
 - `wechat.media.get_chat_video_url`
 - `wechat.media.get_chat_voice_url`
+- `wechat.voice.transcribe`
 - `wechat.media.get_decrypted_resource_url`
 - `wechat.media.get_proxy_image_url`
 - `wechat.media.get_favicon_url`
@@ -22,7 +23,7 @@ Use this for image, video, emoji, file, link, and voice resources.
 ## Rules
 
 - Media tools return URLs or resource metadata; they do not inline large binary payloads.
-- Voice resources are files only. Do not transcribe voice messages.
+- Voice resources are files only by default. Transcribe only when the user explicitly asks: `wechat.voice.transcribe` is opt-in, needs the local Whisper model downloaded/enabled in the app, takes one voice `server_id` per call, and may take seconds per message.
 - For phone clients, prefer `wechat.mobile.get_media_links` first.
 - MCP does not open local folders or download media into cache; use returned URLs in the client.
 - Locate the message first, then fetch media URL by message fields such as `server_id`, `username`, `md5`, or returned media references.

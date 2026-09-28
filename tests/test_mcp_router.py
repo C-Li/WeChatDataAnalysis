@@ -386,6 +386,93 @@ class TestMcpRouter(unittest.TestCase):
         self.assertEqual(calls[0]["start_time"], 1700000000)
         self.assertEqual(calls[0]["end_time"], 1700003600)
 
+    def test_voice_transcribe_tool_requires_server_id(self):
+        client = self._client()
+
+        tools_resp = client.post("/mcp", json=self._rpc("tools/list"))
+        self.assertEqual(tools_resp.status_code, 200)
+        tools = {tool["name"]: tool for tool in tools_resp.json()["result"]["tools"]}
+        self.assertIn("wechat.voice.transcribe", tools)
+        self.assertEqual(tools["wechat.voice.transcribe"]["inputSchema"]["required"], ["server_id"])
+        self.assertTrue(tools["wechat.voice.transcribe"]["annotations"]["readOnlyHint"])
+
+        resp = client.post(
+            "/mcp",
+            json=self._rpc("tools/call", {"name": "wechat.voice.transcribe", "arguments": {}}),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["error"]["code"], -32602)
+
+    def test_voice_transcribe_tool_delegates_to_service(self):
+        client = self._client()
+
+        class FakeService:
+            def __init__(self):
+                self.calls = []
+
+            def ensure_available(self):
+                return {"available": True}
+
+            def transcribe_voice(self, *, account_dir, server_id, force=False, cache_generation=None, **_kwargs):
+                self.calls.append({"server_id": server_id, "force": force, "account_dir": str(account_dir), "cache_generation": cache_generation})
+                return {"status": "success", "serverId": server_id, "text": "你好", "cached": False}
+
+        class FakeLease:
+            def __init__(self, service):
+                self.service = service
+                self.released = False
+
+            def release(self):
+                self.released = True
+
+        fake_service = FakeService()
+        fake_lease = FakeLease(fake_service)
+
+        with patch("wechat_decrypt_tool.voice_transcription.acquire_voice_transcription_service_lease", return_value=fake_lease), patch(
+            "wechat_decrypt_tool.voice_transcription.capture_voice_transcript_cache_generation", return_value=7
+        ), patch("wechat_decrypt_tool.mcp.tools._resolve_account_dir", return_value=Path("acc-dir")):
+            resp = client.post(
+                "/mcp",
+                json=self._rpc("tools/call", {"name": "wechat.voice.transcribe", "arguments": {"server_id": 123}}),
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["result"]["isError"])
+        structured = self._structured(resp)
+        self.assertEqual(structured["text"], "你好")
+        self.assertEqual(fake_service.calls, [{"server_id": 123, "force": False, "account_dir": "acc-dir", "cache_generation": 7}])
+        self.assertTrue(fake_lease.released)
+
+    def test_voice_transcribe_tool_returns_error_payload(self):
+        from wechat_decrypt_tool.voice_transcription import VoiceTranscriptionError
+
+        client = self._client()
+
+        class FakeService:
+            def ensure_available(self):
+                raise VoiceTranscriptionError("disabled", "语音转文字功能未启用。")
+
+        class FakeLease:
+            service = FakeService()
+
+            def release(self):
+                pass
+
+        with patch("wechat_decrypt_tool.voice_transcription.acquire_voice_transcription_service_lease", return_value=FakeLease()), patch(
+            "wechat_decrypt_tool.voice_transcription.capture_voice_transcript_cache_generation", return_value=1
+        ):
+            resp = client.post(
+                "/mcp",
+                json=self._rpc("tools/call", {"name": "wechat.voice.transcribe", "arguments": {"server_id": 456}}),
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        result = resp.json()["result"]
+        self.assertTrue(result["isError"])
+        structured = self._structured(resp)
+        self.assertEqual(structured["status"], "error")
+        self.assertEqual(structured["code"], "disabled")
+
     def test_mobile_recent_context_defaults_to_auto_source(self):
         client = self._client()
         calls = []
