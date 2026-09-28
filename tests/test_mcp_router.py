@@ -90,6 +90,9 @@ class TestMcpRouter(unittest.TestCase):
     def setUp(self):
         self._old_mcp_token = os.environ.get("WECHAT_TOOL_MCP_TOKEN")
         os.environ["WECHAT_TOOL_MCP_TOKEN"] = self.TEST_TOKEN
+        from wechat_decrypt_tool.mcp import tools as mcp_tools
+
+        mcp_tools._reset_sessions_cache()
 
     def tearDown(self):
         if self._old_mcp_token is None:

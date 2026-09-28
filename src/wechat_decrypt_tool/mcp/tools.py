@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlencode
 
@@ -311,16 +313,44 @@ def _resolve_contact(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any
     return {"status": "success", "query": query, "count": len(candidates), "candidates": _clip_deep(candidates, max_items=50)}
 
 
+# 复合工具在 1-2 秒内会以相同 (account, source) 重复拉取会话表，用短 TTL 去重。
+_SESSIONS_CACHE: dict[tuple[Any, ...], tuple[float, int, dict[str, Any]]] = {}
+_SESSIONS_CACHE_TTL_SECONDS = 1.5
+_SESSIONS_CACHE_LOCK = threading.Lock()
+
+
+def _reset_sessions_cache() -> None:
+    with _SESSIONS_CACHE_LOCK:
+        _SESSIONS_CACHE.clear()
+
+
 def _list_sessions(args: dict[str, Any], ctx: McpToolContext) -> dict[str, Any]:
-    result = _chat_router().list_chat_sessions(
-        _request(ctx),
-        account=_account_arg(args),
-        limit=_int(args, "limit", 50, minimum=1, maximum=200),
-        include_hidden=_bool(args, "include_hidden", False),
-        include_official=_bool(args, "include_official", False),
-        preview=_str(args, "preview", "latest") or "latest",
-        source=_chat_source(args),
+    limit = _int(args, "limit", 50, minimum=1, maximum=200)
+    cache_key = (
+        _account_arg(args),
+        _chat_source(args),
+        _bool(args, "include_hidden", False),
+        _bool(args, "include_official", False),
+        _str(args, "preview", "latest") or "latest",
     )
+    now = time.monotonic()
+    result: Optional[dict[str, Any]] = None
+    with _SESSIONS_CACHE_LOCK:
+        hit = _SESSIONS_CACHE.get(cache_key)
+        if hit and now - hit[0] <= _SESSIONS_CACHE_TTL_SECONDS and hit[1] >= limit:
+            result = hit[2]
+    if result is None:
+        result = _chat_router().list_chat_sessions(
+            _request(ctx),
+            account=cache_key[0],
+            limit=limit,
+            include_hidden=cache_key[2],
+            include_official=cache_key[3],
+            preview=cache_key[4],
+            source=cache_key[1],
+        )
+        with _SESSIONS_CACHE_LOCK:
+            _SESSIONS_CACHE[cache_key] = (now, limit, result)
     items = list(result.get("sessions") or result.get("items") or [])
     query = (_opt_str(args, "query") or _opt_str(args, "keyword") or "").lower()
     if query:
