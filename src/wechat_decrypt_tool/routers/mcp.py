@@ -146,6 +146,28 @@ def _read_skill_bundle() -> dict[str, Any]:
     }
 
 
+def _read_skill_reference(ref_name: str) -> str | None:
+    """Return the text of one skill reference file, or None when unknown or unsafe.
+
+    Accepts ``mobile.md`` or ``references/mobile.md``; only files directly inside
+    the skill ``references`` directory are allowed (no traversal, no subdirectories).
+    """
+
+    skill_root = _find_skill_root()
+    if skill_root is None:
+        return None
+    name = ref_name.strip().replace("\\", "/").lstrip("/")
+    if not name.lower().endswith(".md"):
+        return None
+    if not name.lower().startswith("references/"):
+        name = f"references/{name}"
+    references_dir = (skill_root / "references").resolve()
+    path = (skill_root / name).resolve()
+    if path.parent != references_dir or not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8")
+
+
 @router.get("/mcp", summary="MCP endpoint")
 async def mcp_get(request: Request):
     if not _verify_mcp_token(request):
@@ -163,9 +185,17 @@ async def mcp_skill_bundle(request: Request):
 
 
 @router.get("/mcp/skill", summary="MCP skill text")
-async def mcp_skill_text(request: Request):
+async def mcp_skill_text(request: Request, ref: str | None = None):
     if not _verify_mcp_token(request):
         return _mcp_unauthorized()
+
+    ref_name = str(ref or "").strip()
+    if ref_name:
+        content = _read_skill_reference(ref_name)
+        if content is None:
+            return PlainTextResponse(f"Unknown skill reference: {ref_name}", status_code=404)
+        return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
+
     payload = _read_skill_bundle()
     if payload.get("status") != "success":
         return PlainTextResponse(str(payload.get("message") or "Skill not found."), status_code=404)

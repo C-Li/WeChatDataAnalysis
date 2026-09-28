@@ -226,6 +226,30 @@ class TestMcpRouter(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("WeChat MCP Copilot", resp.text)
 
+    def test_skill_ref_returns_single_reference(self):
+        client = self._client()
+
+        full = client.get("/mcp/skill")
+        self.assertEqual(full.status_code, 200)
+
+        resp = client.get("/mcp/skill?ref=mobile.md")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.text.strip())
+        self.assertIn(resp.text, full.text)
+
+        full_path_resp = client.get("/mcp/skill?ref=references/mobile.md")
+        self.assertEqual(full_path_resp.status_code, 200)
+        self.assertEqual(full_path_resp.text, resp.text)
+
+        missing_resp = client.get("/mcp/skill?ref=no-such-file.md")
+        self.assertEqual(missing_resp.status_code, 404)
+
+        escape_resp = client.get("/mcp/skill", params={"ref": "../SKILL.md"})
+        self.assertEqual(escape_resp.status_code, 404)
+
+        nested_escape_resp = client.get("/mcp/skill", params={"ref": "references/../../SKILL.md"})
+        self.assertEqual(nested_escape_resp.status_code, 404)
+
     def test_ping_returns_empty_result(self):
         client = self._client()
 
