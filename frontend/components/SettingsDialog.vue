@@ -1042,7 +1042,7 @@ const mcpAiPrompt = computed(() => [
   '接入要求：',
   '1. 使用 JSON-RPC 2.0 POST 到 MCP endpoint，Content-Type 为 application/json，并带上 Authorization Bearer token。',
   '2. 先调用 initialize，再用 tools/list 分页读取工具 schema。',
-  '3. 工具调用使用 tools/call，优先读取 result.structuredContent。',
+  '3. 工具调用使用 tools/call，读取 result.content[0].text（紧凑 JSON）。',
   '4. 不要一次性请求大结果；按下方 skill 的分页和上下文预算逐步扩展。',
   '5. 媒体、导出和 SSE 进度按返回 URL 在 App 侧加载，不要让模型内联二进制内容。',
 ].join('\n'))

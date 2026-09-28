@@ -386,7 +386,7 @@ class TestChatMediaImageCacheUpgrade(unittest.TestCase):
                             },
                         })
                         self.assertEqual(result.status_code, 200)
-                        image_url = result.json()["result"]["structuredContent"]["url"]
+                        image_url = json.loads(result.json()["result"]["content"][0]["text"])["url"]
                         resp = client.get(image_url)
 
                 self.assertEqual(resp.status_code, 200)

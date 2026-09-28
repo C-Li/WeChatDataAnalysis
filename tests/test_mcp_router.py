@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -111,6 +112,10 @@ class TestMcpRouter(unittest.TestCase):
         if params is not None:
             payload["params"] = params
         return payload
+
+    def _structured(self, resp):
+        """Parse the compact JSON payload carried by the tool text content."""
+        return json.loads(resp.json()["result"]["content"][0]["text"])
 
     def test_initialize_and_tools_list(self):
         client = self._client()
@@ -289,7 +294,7 @@ class TestMcpRouter(unittest.TestCase):
         )
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["status"], "success")
         self.assertEqual(structured["count"], 2)
         self.assertIn("nextCursor", structured)
@@ -310,10 +315,10 @@ class TestMcpRouter(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         result = resp.json()["result"]
         self.assertFalse(result["isError"])
-        self.assertEqual(result["structuredContent"]["status"], "success")
-        self.assertTrue(result["structuredContent"]["dbReady"])
-        self.assertEqual(result["structuredContent"]["defaultAccount"], "wxid_test")
-        self.assertEqual(result["content"][0]["type"], "text")
+        structured = json.loads(result["content"][0]["text"])
+        self.assertEqual(structured["status"], "success")
+        self.assertTrue(structured["dbReady"])
+        self.assertEqual(structured["defaultAccount"], "wxid_test")
 
     def test_mcp_chat_read_tools_default_to_auto_source(self):
         client = self._client()
@@ -343,8 +348,8 @@ class TestMcpRouter(unittest.TestCase):
 
         self.assertEqual(sessions_resp.status_code, 200)
         self.assertEqual(messages_resp.status_code, 200)
-        self.assertEqual(sessions_resp.json()["result"]["structuredContent"]["source"], "auto")
-        self.assertEqual(messages_resp.json()["result"]["structuredContent"]["source"], "auto")
+        self.assertEqual(self._structured(sessions_resp)["source"], "auto")
+        self.assertEqual(self._structured(messages_resp)["source"], "auto")
         self.assertIn(("sessions", {"account": None, "limit": 50, "include_hidden": False, "include_official": False, "preview": "latest", "source": "auto"}), calls)
         self.assertTrue(any(kind == "messages" and kwargs.get("source") == "auto" for kind, kwargs in calls))
 
@@ -378,7 +383,7 @@ class TestMcpRouter(unittest.TestCase):
             )
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["messages"]["source"], "auto")
         self.assertTrue(any(kind == "messages" and kwargs.get("source") == "auto" for kind, kwargs in calls))
         self.assertTrue(any(kind == "sessions" and kwargs.get("source") == "auto" for kind, kwargs in calls))
@@ -500,7 +505,7 @@ class TestMcpRouter(unittest.TestCase):
             )
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["source"], "realtime_index")
         self.assertNotIn("freshness", structured)
         self.assertFalse(calls[0]["allow_native_enrichment"])
@@ -526,7 +531,7 @@ class TestMcpRouter(unittest.TestCase):
                 ),
             )
 
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["index"]["indexMtimeNs"], "9007199254740993")
         self.assertEqual(structured["hits"][0]["serverId"], "9007199254740993")
         self.assertEqual(structured["limit"], 20)
@@ -551,7 +556,7 @@ class TestMcpRouter(unittest.TestCase):
             )
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["source"], "decrypted_index")
         self.assertEqual(structured["freshness"]["kind"], "snapshot")
         self.assertFalse(structured["freshness"]["latestRealtimeIncluded"])
@@ -590,7 +595,7 @@ class TestMcpRouter(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         result = resp.json()["result"]
         self.assertTrue(result["isError"])
-        structured = result["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["status"], "error")
         self.assertEqual(structured["accounts"], [])
 
@@ -660,7 +665,7 @@ class TestMcpRouter(unittest.TestCase):
         payload = resp.json()
         self.assertEqual(len(payload), 2)
         self.assertEqual(payload[0]["result"], {})
-        self.assertEqual(payload[1]["result"]["structuredContent"]["defaultAccount"], "wxid_test")
+        self.assertEqual(json.loads(payload[1]["result"]["content"][0]["text"])["defaultAccount"], "wxid_test")
 
     def test_unknown_tool_returns_json_rpc_error(self):
         client = self._client()
@@ -740,7 +745,7 @@ class TestMcpRouter(unittest.TestCase):
                 },
             ),
         )
-        image = image_resp.json()["result"]["structuredContent"]
+        image = self._structured(image_resp)
         self.assertIn("/api/chat/media/image?", image["url"])
         self.assertEqual(image["params"]["server_id"], 123)
         self.assertEqual(image["params"]["file_id"], "fid")
@@ -761,7 +766,7 @@ class TestMcpRouter(unittest.TestCase):
                 {"tid": "post-a", "media_id": "media-a", "md5": "deadbeef", "use_cache": 1},
             ),
         )
-        moments = moments_resp.json()["result"]["structuredContent"]
+        moments = self._structured(moments_resp)
         self.assertIn("/api/sns/media?", moments["url"])
         self.assertEqual(moments["params"]["post_id"], "post-a")
         self.assertEqual(moments["params"]["media_id"], "media-a")
@@ -779,10 +784,11 @@ class TestMcpRouter(unittest.TestCase):
             self.assertIn("record_index_path", properties)
             for options, expected in [({}, "True"), ({"prefer_live": False, "fetch_remote": False}, "False")]:
                 with self.subTest(options=options):
-                    result = client.post("/mcp", json=self._rpc("tools/call", {
+                    call_resp = client.post("/mcp", json=self._rpc("tools/call", {
                         "name": "wechat.media.get_chat_image_url",
                         "arguments": {"md5": "abc", **options},
-                    })).json()["result"]["structuredContent"]
+                    }))
+                    result = self._structured(call_resp)
                     query = parse_qs(urlsplit(result["url"]).query)
                     self.assertEqual(query["prefer_live"], [expected])
                     if options:
@@ -835,7 +841,7 @@ class TestMcpRouter(unittest.TestCase):
             with self.subTest(tool_name=tool_name):
                 resp = client.post("/mcp", json=self._rpc(tool_name, args))
                 self.assertEqual(resp.status_code, 200)
-                structured = resp.json()["result"]["structuredContent"]
+                structured = self._structured(resp)
                 self.assertEqual(structured["status"], "success")
                 self.assertIn(path_part, structured[url_key])
 
@@ -911,7 +917,7 @@ class TestMcpRouter(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             result = resp.json()["result"]
             self.assertTrue(result["isError"])
-            structured = result["structuredContent"]
+            structured = self._structured(resp)
             self.assertEqual(structured["status"], "error")
             self.assertTrue(structured["cacheOnly"])
             self.assertEqual(structured["message"], "Wrapped cache not found. Open the app to generate it first.")
@@ -932,7 +938,7 @@ class TestMcpRouter(unittest.TestCase):
             )
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertTrue(structured["ok"])
         self.assertTrue(structured["ready"])
         self.assertEqual(structured["defaultAccount"], "wxid_a")
@@ -959,7 +965,7 @@ class TestMcpRouter(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         payload = resp.json()
         self.assertNotIn("error", payload)
-        structured = payload["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertNotIn("realtime", structured["health"])
         self.assertNotIn("indexes", structured["health"])
 
@@ -980,7 +986,7 @@ class TestMcpRouter(unittest.TestCase):
             resp = client.post("/mcp", json=self._rpc("wechat.mobile.resolve_target", {"query": "Alice", "limit": 5}))
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["status"], "success")
         self.assertEqual(structured["best"]["username"], "wxid_friend")
         self.assertEqual(structured["best"]["kind"], "contact")
@@ -997,7 +1003,7 @@ class TestMcpRouter(unittest.TestCase):
         )
 
         self.assertEqual(resp.status_code, 200)
-        structured = resp.json()["result"]["structuredContent"]
+        structured = self._structured(resp)
         self.assertEqual(structured["status"], "success")
         self.assertEqual(structured["resources"][0]["kind"], "favicon")
         self.assertIn("/api/chat/media/favicon?", structured["resources"][0]["url"])

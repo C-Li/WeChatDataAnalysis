@@ -121,7 +121,6 @@ class McpToolRegistry:
         is_error = isinstance(encoded, dict) and str(encoded.get("status") or "").lower() == "error"
         return {
             "content": [{"type": "text", "text": text}],
-            "structuredContent": encoded,
             "isError": is_error,
         }
 
