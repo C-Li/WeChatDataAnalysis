@@ -1480,9 +1480,29 @@ def _install_tools() -> None:
     _register("wechat.moments.list_timeline", "List Moments timeline by users, keyword, and pagination.", object_schema({**COMMON_ACCOUNT, **PAGING, "usernames": array_schema("Optional poster usernames.", string_schema("Username.")), "keyword": string_schema("Optional content keyword.")}), _sns_timeline, package="wechat.moments")
     _register("wechat.moments.search_moments", "Alias for timeline keyword/user search.", object_schema({**COMMON_ACCOUNT, **PAGING, "usernames": array_schema("Optional poster usernames.", string_schema("Username.")), "query": string_schema("Content keyword.")}), _sns_timeline, package="wechat.moments")
     _register("wechat.moments.list_users", "List Moments posters with post counts.", object_schema({**COMMON_ACCOUNT, "keyword": string_schema("Optional poster keyword."), "limit": int_schema("Maximum users.", minimum=1, maximum=500)}), _sns_users, package="wechat.moments")
-    _register("wechat.moments.get_media_url", "Build a URL for a Moments image resource.", object_schema(additional_properties=True), _sns_media_url, package="wechat.media")
+    _register("wechat.moments.get_media_url", "Build a URL for a Moments image resource.", object_schema({
+        **COMMON_ACCOUNT,
+        "post_id": string_schema("朋友圈动态 id。"),
+        "media_id": string_schema("媒体 id。"),
+        "create_time": int_schema("动态时间戳。"),
+        "width": int_schema("媒体宽度。", minimum=0),
+        "height": int_schema("媒体高度。", minimum=0),
+        "total_size": int_schema("文件大小。", minimum=0),
+        "idx": int_schema("媒体索引。", minimum=0),
+        "post_type": int_schema("动态类型。", minimum=0),
+        "media_type": int_schema("媒体类型。", minimum=0),
+        "md5": string_schema("媒体 md5。"),
+        "token": string_schema("CDN 下载 token。"),
+        "url": string_schema("CDN 地址。"),
+        "key": string_schema("CDN 解密 key。"),
+    }, additional_properties=True), _sns_media_url, package="wechat.media")
     _register("wechat.moments.get_article_thumb_url", "Build a URL for an official-article thumbnail image.", object_schema({"url": string_schema("Article URL.")}, required=["url"]), _sns_article_thumb_url, package="wechat.media")
-    _register("wechat.moments.get_remote_video_url", "Build a URL for a remote Moments video/live-photo resource.", object_schema(additional_properties=True), _sns_video_remote_url, package="wechat.media")
+    _register("wechat.moments.get_remote_video_url", "Build a URL for a remote Moments video/live-photo resource.", object_schema({
+        **COMMON_ACCOUNT,
+        "url": string_schema("视频 CDN 地址。"),
+        "token": string_schema("CDN 下载 token。"),
+        "key": string_schema("CDN 解密 key。"),
+    }, additional_properties=True), _sns_video_remote_url, package="wechat.media")
     _register("wechat.moments.get_local_video_url", "Build a URL for a local cached Moments video resource.", object_schema({**COMMON_ACCOUNT, "post_id": string_schema("Moments post id."), "media_id": string_schema("Media id.")}, required=["post_id", "media_id"]), _sns_video_url, package="wechat.media")
 
     _register("wechat.biz.list_accounts", "List official account/service account message sources.", object_schema(COMMON_ACCOUNT), _biz_accounts, package="wechat.biz")
@@ -1534,10 +1554,31 @@ def _install_tools() -> None:
         }, additional_properties=True),
         _chat_image_url, package="wechat.media",
     )
-    _register("wechat.media.get_chat_emoji_url", "Build a URL for a chat emoji message resource.", object_schema(additional_properties=True), _chat_emoji_url, package="wechat.media")
-    _register("wechat.media.get_chat_video_thumb_url", "Build a URL for a chat video thumbnail.", object_schema(additional_properties=True), _chat_video_thumb_url, package="wechat.media")
-    _register("wechat.media.get_chat_video_url", "Build a URL for a chat video resource.", object_schema(additional_properties=True), _chat_video_url, package="wechat.media")
-    _register("wechat.media.get_chat_voice_url", "Build a URL for a chat voice file. This does not transcribe audio.", object_schema(additional_properties=True), _chat_voice_url, package="wechat.media")
+    _register("wechat.media.get_chat_emoji_url", "Build a URL for a chat emoji message resource.", object_schema({
+        **COMMON_ACCOUNT,
+        "username": string_schema("表情所属会话。"),
+        "md5": string_schema("表情 md5。"),
+        "emoji_url": string_schema("表情 CDN 地址。"),
+        "aes_key": string_schema("表情 AES 解密密钥。"),
+    }, additional_properties=True), _chat_emoji_url, package="wechat.media")
+    _register("wechat.media.get_chat_video_thumb_url", "Build a URL for a chat video thumbnail.", object_schema({
+        **COMMON_ACCOUNT,
+        "username": string_schema("视频所属会话。"),
+        "md5": string_schema("视频 md5。"),
+        "file_id": string_schema("视频 file id。"),
+        "deep_scan": bool_schema("允许扩大本地文件搜索范围。", default=False),
+    }, additional_properties=True), _chat_video_thumb_url, package="wechat.media")
+    _register("wechat.media.get_chat_video_url", "Build a URL for a chat video resource.", object_schema({
+        **COMMON_ACCOUNT,
+        "username": string_schema("视频所属会话。"),
+        "md5": string_schema("视频 md5。"),
+        "file_id": string_schema("视频 file id。"),
+        "deep_scan": bool_schema("允许扩大本地文件搜索范围。", default=False),
+    }, additional_properties=True), _chat_video_url, package="wechat.media")
+    _register("wechat.media.get_chat_voice_url", "Build a URL for a chat voice file. This does not transcribe audio.", object_schema({
+        **COMMON_ACCOUNT,
+        "server_id": int_schema("语音消息 server_id。"),
+    }, additional_properties=True), _chat_voice_url, package="wechat.media")
     _register("wechat.media.get_decrypted_resource_url", "Build a URL for a previously decrypted resource by MD5.", object_schema({**COMMON_ACCOUNT, "md5": string_schema("32-character resource md5.")}, required=["md5"]), _decrypted_media_resource_url, package="wechat.media")
     _register("wechat.media.get_proxy_image_url", "Build a backend proxy URL for a remote chat image.", object_schema({"url": string_schema("Remote image URL.")}, required=["url"]), _chat_proxy_image_url, package="wechat.media")
     _register("wechat.media.get_favicon_url", "Build a backend URL for a web page favicon.", object_schema({"url": string_schema("Page URL.")}, required=["url"]), _chat_favicon_url, package="wechat.media")
@@ -1551,8 +1592,39 @@ def _install_tools() -> None:
     _register("wechat.mobile.get_chat_context", "Return a compact chat context by recent page, anchor, or day. Recent mode defaults to live WeChat data when available.", object_schema({**COMMON_ACCOUNT, **CHAT_SOURCE, "username": string_schema("Session username."), "target": string_schema("Optional fuzzy session clue."), "mode": string_schema("recent, around, or day."), "anchor_id": string_schema("Message anchor id."), "message_id": string_schema("Alias for anchor_id."), "date": string_schema("YYYY-MM-DD for day mode."), "limit": int_schema("Message count.", minimum=1, maximum=100), "offset": int_schema("Message offset.", minimum=0), "order": string_schema("asc or desc."), "render_types": string_schema("Optional render type filter."), "before": int_schema("Messages before anchor.", minimum=0, maximum=30), "after": int_schema("Messages after anchor.", minimum=0, maximum=30)}), _mobile_get_chat_context, package="wechat.mobile")
     _register("wechat.mobile.get_session_bundle", "Return one session's metadata, messages, and optional calendar counts for mobile UI. Messages default to live WeChat data when available.", object_schema({**COMMON_ACCOUNT, **CHAT_SOURCE, "username": string_schema("Session username."), "limit": int_schema("Message count.", minimum=1, maximum=100), "offset": int_schema("Message offset.", minimum=0), "order": string_schema("asc or desc."), "render_types": string_schema("Optional render type filter."), "year": int_schema("Optional year for daily counts."), "month": int_schema("Optional month for daily counts.", minimum=1, maximum=12)}, required=["username"]), _mobile_session_bundle, package="wechat.mobile")
     _register("wechat.mobile.search_moments", "Search Moments posts with compact media references.", object_schema({**COMMON_ACCOUNT, "query": string_schema("Content keyword."), "poster": string_schema("Optional poster clue."), "usernames": array_schema("Poster usernames.", string_schema("Username.")), "limit": int_schema("Post count.", minimum=1, maximum=30), "offset": int_schema("Offset cursor.", minimum=0)}), _mobile_search_moments, package="wechat.mobile")
-    _register("wechat.mobile.get_media_links", "Return URL resources for chat, Moments, avatar, link, or emoji media.", object_schema(additional_properties=True), _mobile_get_media_links, package="wechat.mobile")
-    _register("wechat.mobile.get_message_media_bundle", "Return likely media URLs for a message or link without fetching binary content.", object_schema(additional_properties=True), _mobile_message_media_bundle, package="wechat.mobile")
+    _register("wechat.mobile.get_media_links", "Return URL resources for chat, Moments, avatar, link, or emoji media.", object_schema({
+        **COMMON_ACCOUNT,
+        "kind": string_schema(
+            "资源类型；auto 时按已提供的 id 自动探测。",
+            enum=[
+                "auto", "avatar", "chat_image", "image", "chat_emoji", "emoji",
+                "video_thumb", "chat_video_thumb", "video", "chat_video",
+                "voice", "chat_voice", "moments", "moments_image",
+                "moments_video", "remote_video", "favicon", "proxy_image",
+            ],
+            default="auto",
+        ),
+        "username": string_schema("头像/媒体所属会话。"),
+        "md5": string_schema("图片/视频/表情 md5。"),
+        "file_id": string_schema("图片/视频 file id。"),
+        "server_id": int_schema("语音或图片消息 server_id。"),
+        "msg_svr_id": int_schema("server_id 的兼容别名。"),
+        "emoji_url": string_schema("表情 CDN 地址。"),
+        "aes_key": string_schema("表情 AES 解密密钥。"),
+        "url": string_schema("远端图片、视频地址或网页地址。"),
+        "max_items": int_schema("最多返回的资源数，默认 20。", minimum=1, maximum=20),
+    }, additional_properties=True), _mobile_get_media_links, package="wechat.mobile")
+    _register("wechat.mobile.get_message_media_bundle", "Return likely media URLs for a message or link without fetching binary content.", object_schema({
+        **COMMON_ACCOUNT,
+        "username": string_schema("消息所属会话。"),
+        "server_id": int_schema("消息 server_id。"),
+        "msg_svr_id": int_schema("server_id 的兼容别名。"),
+        "md5": string_schema("图片/视频/表情 md5。"),
+        "file_id": string_schema("图片/视频 file id。"),
+        "emoji_url": string_schema("表情 CDN 地址。"),
+        "aes_key": string_schema("表情 AES 解密密钥。"),
+        "url": string_schema("链接消息网页地址。"),
+    }, additional_properties=True), _mobile_message_media_bundle, package="wechat.mobile")
     _register("wechat.mobile.get_analytics", "Return compact analytics data by metric without loading full annual payloads. Chat daily-count analytics default to live WeChat data when available.", object_schema({**CHAT_SOURCE}, additional_properties=True), _mobile_get_analytics, package="wechat.mobile")
 
 
