@@ -14,9 +14,11 @@ class MessageTotals:
         self.store.event(job['account'], 'local_search_total', total, unique_key=f'index_total:{job["id"]}', replace=True)
 
     def message_plan(self, job):
-        account_key = hashlib.sha256(job['account'].encode()).hexdigest()
-        job_key = hashlib.sha256(job['id'].encode()).hexdigest()
-        path = self.root / 'plans' / account_key / f'{job_key}.sqlite3'
+        # 单层短 hash 命名：两层 64 位 hash 目录在深层输出目录下会使 sqlite 的
+        # journal 路径超过 Windows MAX_PATH(260)，导致 CANTOPEN 无法建库。
+        account_key = hashlib.sha256(job['account'].encode()).hexdigest()[:16]
+        job_key = hashlib.sha256(job['id'].encode()).hexdigest()[:16]
+        path = self.root / 'plans' / f'{account_key}-{job_key}.sqlite3'
         previous = self.store.get('index_message_total', job['id']) or {}
         if previous.get('fixed') and not path.exists():
             raise InferenceFailure('本轮消息清单已丢失，请从头整理；原有索引仍保留。', 'plan_missing')
@@ -69,7 +71,7 @@ class MessageTotals:
             raise InferenceFailure('消息总量统计未完成，已保留统计进度，请继续整理以重试。', 'count_failed') from error
 
     def clear_message_plans(self, account):
-        account_key = hashlib.sha256(account.encode()).hexdigest()
-        directory = self.root / 'plans' / account_key
-        for path in directory.glob('*.sqlite3'):
+        account_key = hashlib.sha256(account.encode()).hexdigest()[:16]
+        directory = self.root / 'plans'
+        for path in directory.glob(f'{account_key}-*.sqlite3'):
             path.unlink(missing_ok=True)
