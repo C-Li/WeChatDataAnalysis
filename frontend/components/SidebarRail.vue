@@ -50,6 +50,7 @@
 
       <!-- Moments -->
       <div
+        v-if="!isNavHidden('sns')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="朋友圈"
         @click="goSns"
@@ -79,6 +80,7 @@
       </div>
 
       <button
+        v-if="!isNavHidden('advanced')"
         type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="高级功能演示"
@@ -92,6 +94,7 @@
 
       <!-- 套餐与额度（WxCDN 原图通道） -->
       <button
+        v-if="!isNavHidden('plan')"
         type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="套餐与额度"
@@ -109,6 +112,7 @@
 
       <!-- Favorites -->
       <div
+        v-if="!isNavHidden('favorites')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="收藏"
         @click="goFavorites"
@@ -124,6 +128,7 @@
 
       <!-- Contacts -->
       <div
+        v-if="!isNavHidden('contacts')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="联系人"
         @click="goContacts"
@@ -141,6 +146,7 @@
       </div>
 
       <div
+          v-if="!isNavHidden('biz')"
           class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
           title="服务号"
           @click="goBiz"
@@ -157,6 +163,7 @@
 
       <!-- Mini Programs -->
       <div
+        v-if="!isNavHidden('mini-programs')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="小程序"
         @click="goMiniPrograms"
@@ -172,6 +179,7 @@
 
       <!-- Finder / Live -->
       <div
+        v-if="!isNavHidden('finder')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="视频号 / 直播"
         @click="goFinder"
@@ -189,6 +197,7 @@
 
       <!-- Payments -->
       <div
+        v-if="!isNavHidden('payments')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="转账 / 红包"
         @click="goPayments"
@@ -204,6 +213,7 @@
 
       <!-- Wrapped -->
       <div
+        v-if="!isNavHidden('wrapped')"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="年度总结"
         @click="goWrapped"
@@ -502,6 +512,7 @@ import { storeToRefs } from 'pinia'
 import { buildAccountAvatarUrl } from '~/lib/account-avatar'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
+import { useSidebarNavStore } from '~/stores/sidebarNav'
 import { useThemeStore } from '~/stores/theme'
 
 const route = useRoute()
@@ -518,6 +529,12 @@ const { privacyMode } = storeToRefs(privacyStore)
 
 const themeStore = useThemeStore()
 themeStore.init()
+
+// 侧边栏功能页入口的显隐：只在客户端 onMounted 后读取，
+// 保证服务端渲染与 hydration 阶段的按钮一致。
+const sidebarNavStore = useSidebarNavStore()
+const { hiddenKeys: hiddenNavKeys } = storeToRefs(sidebarNavStore)
+const isNavHidden = (key) => hiddenNavKeys.value.includes(String(key))
 
 // 主题存在 localStorage 里，服务端渲染时无从得知，而 Vue 不会修正 hydration
 // 的属性不一致 —— 直接绑 isDark 的话，深色下这里会一直挂着「切换深色模式」。
@@ -734,6 +751,7 @@ watch(selectedAccount, () => {
 
 onMounted(async () => {
   isMacosDesktop.value = window?.wechatDesktop?.platform === 'darwin'
+  sidebarNavStore.init()
   await chatAccounts.ensureLoaded()
   if (process.client && typeof window !== 'undefined') {
     window.addEventListener('keydown', onWindowKeydown)

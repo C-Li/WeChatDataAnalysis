@@ -720,6 +720,10 @@
             </div>
           </section>
 
+          <section ref="sidebarSectionRef">
+            <SidebarNavSettings />
+          </section>
+
         </div>
       </main>
     </div>
@@ -760,9 +764,11 @@ const settingNavItems = [
   { key: 'media', label: '聊天与媒体', hint: '原图获取' },
   { key: 'updates', label: '更新', hint: '版本信息 / 检查更新' },
   { key: 'sns', label: '朋友圈', hint: '图片缓存策略' },
+  { key: 'sidebar', label: '侧边栏', hint: '功能入口显示 / 隐藏' },
 ]
 
 const activeSection = ref(settingNavItems[0].key)
+
 const contentScrollRef = ref(null)
 const desktopSectionRef = ref(null)
 const desktopLogFileRef = ref(null)
@@ -774,6 +780,7 @@ const startupSectionRef = ref(null)
 const mediaSectionRef = ref(null)
 const updatesSectionRef = ref(null)
 const snsSectionRef = ref(null)
+const sidebarSectionRef = ref(null)
 
 const isDesktopEnv = ref(false)
 const desktopUpdate = useDesktopUpdate()
@@ -1088,6 +1095,7 @@ const sectionElements = computed(() => [
   { key: 'media', el: mediaSectionRef.value },
   { key: 'updates', el: updatesSectionRef.value },
   { key: 'sns', el: snsSectionRef.value },
+  { key: 'sidebar', el: sidebarSectionRef.value },
 ])
 
 const scrollToSection = (key) => {
